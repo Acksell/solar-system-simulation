@@ -6,8 +6,9 @@ import numpy as np
 from matplotlib import pyplot as plt
 from matplotlib import animation
 
+from integrators import SymplecticEuler, Leapfrog, RungeKutta4
+from constants import G
 
-G = 6.67408*1e-11  # N⋅m2/kg2
 
 def norm(a,b):
     return math.hypot(a, b)
@@ -24,12 +25,42 @@ class Particle:
         self.py = p0y
         self.m = m
         self.fixed = fixed
+        self.qx_list = []
+        self.qy_list = []
+        self.prev_sign = None
+
+    @property
+    def vx(self):
+        return self.px/self.m
+    
+    @property
+    def vy(self):
+        return self.py/self.m
+    
+    @vx.setter
+    def vx(self, value):
+        self.px = value*self.m
+    
+    @vy.setter
+    def vy(self, value):
+        self.py = value*self.m
+
+    def store_position(self):
+        self.qx_list.append(self.qx)
+        self.qy_list.append(self.qy)
 
     def kinetic_energy(self):
         return norm(self.px, self.py)**2/self.m/2
 
+    def angular_momentum(self, origin=(0,0)):
+        return np.cross([self.qx,self.qy,0],[self.px,self.py,0])
+
+    def __str__(self):
+        return "<Particle(qx={}\tqy={}\tvx={}\tvy={},\tm={})>".format(round(self.qx,2),round(self.qy,2),round(self.vx,2),round(self.vy,2),self.m)
+    __repr__ = __str__
+
     def copy(self):
-        return Particle(self.qx, self.qy, self.px, self.py, self.m)
+        return Particle(self.qx, self.qy, self.px, self.py, self.m, fixed=self.fixed)
 
 class InitialState:
     def __init__(self, initialparticles):
@@ -40,52 +71,6 @@ class InitialState:
         for particle in self.initialparticles:
             particles.append(particle.copy())
         return particles
-
-class Integrator:
-    def __init__(self, particles, dt):
-        self.particles = particles
-        self.N = len(particles)
-        self.dt = dt
-    
-    def integrate(self):
-        # Should implement this method
-        pass
-
-class SymplecticEuler(Integrator):
-    def dHdq(self, i):
-        dHdq_x = 0
-        dHdq_y = 0
-        for i in range(self.N):
-            for j in range(i+1, self.N):
-                denom = ((self.particles[i].qx - self.particles[j].qx)**2 + (self.particles[i].qy - self.particles[j].qy)**2)**(3/2)
-                dHdq_x += G*self.particles[i].m*self.particles[j].m*(self.particles[i].qx - self.particles[j].qx)/denom
-                dHdq_y += G*self.particles[i].m*self.particles[j].m*(self.particles[i].qy - self.particles[j].qy)/denom
-        return dHdq_x, dHdq_y
-
-    def dHdp(self, i):
-        return (self.particles[i].px/self.particles[i].m, self.particles[i].py/self.particles[i].m)
-
-    def integrate(self):
-        # calculate the gradients first, then loop again to update
-        # this is to avoid particle's being updated based on the 
-        # next timestep of other particles
-        dHdq_list = list(map(lambda i: self.dHdq(i), range(self.N)))
-        dHdp_list = list(map(lambda i: self.dHdp(i), range(self.N)))
-        prev_sign = 1 if self.particles[0].qy > 0 else -1
-        for i,particle in enumerate(self.particles):
-            if particle.fixed:  # dont move the particle
-                continue
-            dHdq_x, dHdq_y = dHdq_list[i]
-            dHdp_x, dHdp_y = dHdp_list[i]
-            particle.px = particle.px - self.dt*dHdq_x
-            particle.py = particle.py - self.dt*dHdq_y
-            particle.qx = particle.qx + self.dt*dHdp_x
-            particle.qy = particle.qy + self.dt*dHdp_y
-            if i == 0 and particle.qx < 0 :
-                new_sign = 1 if particle.qy > 0 else -1
-                if prev_sign != new_sign:
-                    print("Aphelion",particle.qx-self.particles[1].qx)
-                    
 
 class System:
     def __init__(self, particles, integrator, tmax, dt, stepsperframe=2):
@@ -98,60 +83,130 @@ class System:
         self.stepsperframe = stepsperframe
         self.numframes = int(self.tmax/self.dt//self.stepsperframe)
         self.energies = []
+        self.eccentricities = []
+        self.error = 0
 
     def step(self):
         self.integrator.integrate()
         self.t += self.dt
-        # print(round(self.particles[0].qx,5), round(self.particles[0].py,5), end='\r')
+        if 0.8 < self.t/self.tmax < 1.4:
+            if self.particles[0].prev_sign is not None:
+                if self.particles[0].prev_sign != np.sign(self.particles[0].qy):
+                    self.error = abs(self.particles[0].qx - self.particles[0].q0x)
+                    print("found error at qy=",self.particles[0].qy)
+            self.particles[0].prev_sign = np.sign(self.particles[0].qy)
+        if self.t % 10000 == 0:
+            print("[",round(self.t/self.tmax,3),"]", self.eccentricity())
+            self.energies.append(self.H())
+            self.eccentricities.append(self.eccentricity())
+            self.particles[0].store_position()
 
-    def H(self):
-        T=sum(map(lambda body: body.kinetic_energy(), self.particles))
+    def H(self, idx=None):
+        if idx is None:
+            T=sum(map(lambda body: body.kinetic_energy(), self.particles))
+        else:
+            T=self.particles[idx].kinetic_energy()
         U=0 # self-potential energy
         for i in range(len(self.particles)):
+            if idx is not None and idx != i: continue  # skip if not specific particle
             for j in range(i+1, len(self.particles)):
                 denom = norm(self.particles[i].qx-self.particles[j].qx, self.particles[i].qy-self.particles[j].qy)
-                U += G*self.particles[i].m*self.particles[j].m/denom
+                U -= G*self.particles[i].m*self.particles[j].m/denom
         return T+U 
+
+    def reduced_mass(self):
+        one_over_m = sum(map(lambda body: 1/body.m, self.particles))
+        return 1/one_over_m
+
+    def total_angular_momentum(self):
+        #vector Ltot
+        Ltot = sum(map(lambda body: body.angular_momentum(),self.particles))
+        sgn = 1 if Ltot[2] > 0 else -1
+        return sgn*np.linalg.norm(Ltot)
+
+    def eccentricity(self):
+        Ltot = self.total_angular_momentum()
+        return math.sqrt(1 + 2*self.H()*Ltot**2/(self.reduced_mass()*(G*self.particles[0].m*self.particles[1].m)**2))
 
     def simulate(self):
         while self.t < self.tmax:
             self.step()
 
-    def animate(self):
+    def animate(self, boxlimits=10, interval=20):
         # First set up the figure, the axis, and the plot element we want to animate
         fig = plt.figure()
-        ax = plt.axes(xlim=(-10, 10), ylim=(-10, 10))
+        ax = plt.axes(xlim=(-boxlimits, boxlimits), ylim=(-boxlimits, boxlimits))
         d, = ax.plot([body.qx for body in self.particles],
                     [body.qy for body in self.particles], 'ro')
         # circle = plt.Circle((5, 5), 1, color='b', fill=False)
         # ax.add_artist(circle)
         # animation function.  This is called sequentially
         def nextframe(framenr):
-            for frame in range(self.stepsperframe):
+            for frame in range(se-lf.stepsperframe):
                 self.step()
             self.energies.append(self.H())
+            try:
+                self.eccentricities.append(self.eccentricity())
+            except ValueError:
+                print("Hyperbolic")
             d.set_data([body.qx for body in self.particles],
                     [body.qy for body in self.particles])
             return d,
         # call the animator.  blit=True means only re-draw the parts that have changed.
-        anim = animation.FuncAnimation(fig, nextframe, frames=self.numframes, interval=20, blit=True)
+        anim = animation.FuncAnimation(fig, nextframe, frames=self.numframes, interval=interval, blit=True)
         plt.show()
-
-    def store_particle_positions(self):
-        pass
 
 
 if __name__ == "__main__":
     a=0.5
-    R=5
-    particle1 = Particle(R*(1-a), 0,0,1e8*math.sqrt((1+a)/(1-a)), m=1e8)
-    particle2 = Particle(0,0,0,0, m=1e11)
+    R=152*1e9
+    Msol=1.9891e30
+    Mear=5.972e24
+
+    particle1 = Particle(q0x=R, q0y=0,p0x=0,p0y=29.29*1e3*Mear, m=Mear)
+    particle2 = Particle(0,0,0,0, m=Msol, fixed=False)
     particles = [particle1, particle2]
     initial_state = InitialState(particles)
-    system = System(initial_state.get_state(), SymplecticEuler, tmax=1, dt=0.0001,stepsperframe=1000)
-    system.animate()
+
+    integrators = [SymplecticEuler, Leapfrog, RungeKutta4]
+    timesteps = [10, 100, 1000, 10000]
+
+    errors = np.zeros((len(integrators), len(timesteps)))
+    
+    TMAX = 60*60*24*365*1.1
+    for i, integrator in enumerate(integrators):
+        for j, dt in enumerate(timesteps):
+            system = System(initial_state.get_state(), integrator, tmax=TMAX, dt=dt)
+            
+            system.simulate()
+            print("abs error", system.error)
+            print("rel error", system.error/R)
+            errors[i][j] = system.error/R
+            # system.animate(boxlimits=2*R, interval=20)
+            
+            plt.figure()
+            plt.plot(system.energies, label="")
+            plt.legend(["Energy over time," + integrator.NAME])
+            plt.show()
+
+            plt.figure()
+            plt.plot(system.particles[0].qx_list, system.particles[0].qy_list, '-')
+            plt.plot([0],[0],'or')
+            plt.plot(system.particles[1].qx_list, system.particles[1].qy_list, '-')
+            plt.title("Sun-Earth system")
+            plt.legend(["Earth","Sun"])
+            plt.show()
     
     plt.figure()
-    plt.plot(system.energies, label="Energy over time")
-    plt.legend()
+    for i,error in enumerate(errors):
+        plt.plot(timesteps,error, '-')
+    plt.legend([integrator.NAME for integrator in integrators])
+    plt.title("Errors after 1 orbit for different integrators and timestep")
+    plt.xlabel("dt")
+    plt.ylabel("$\Delta x_{rel}$")
+    plt.yscale("log")
+    plt.xscale("log")
     plt.show()
+    print(errors)
+    
+
