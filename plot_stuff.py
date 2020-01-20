@@ -121,17 +121,6 @@ def asteroids():
         initstate = InitialState(parcls)
         system = System(initstate.get_state(), SymplecticEuler, tmax=TMAX*timefactor, dt=100, stepsperframe=400)
         system.simulate()
-        with open("out.txt",'w') as f:
-            print("orbital ecc of ast", system.eccentricity(2))
-            print("orbital ecc of ear", system.eccentricity(0))
-            
-            f.write(str(system.particles[0].qx_list))
-            f.write("\n")
-            f.write(str(system.particles[0].qy_list))
-            f.write(str(system.particles[2].qx_list))
-            f.write("\n")
-            f.write(str(system.particles[2].qx_list))
-            f.write("\n")
         # system.animate(boxlimits=1.5*R, interval=20)
         eccentricitiesEar.append(system.eccentricity(0))
         try:
