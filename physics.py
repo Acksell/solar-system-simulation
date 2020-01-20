@@ -6,15 +6,12 @@ import numpy as np
 from matplotlib import pyplot as plt
 from matplotlib import animation
 
-from integrators import SymplecticEuler, Leapfrog, RungeKutta4
+from Integrators import SymplecticEuler, Leapfrog, RungeKutta4
 from constants import G
-
-
-def norm(a,b):
-    return math.hypot(a, b)
+from helpers import norm
 
 class Particle:
-    def __init__(self,q0x,q0y,p0x,p0y, m, fixed=False):
+    def __init__(self,q0x,q0y,p0x,p0y, m, fixed=False,name=""):
         self.q0x = q0x
         self.q0y = q0y
         self.p0x = p0x
@@ -25,6 +22,8 @@ class Particle:
         self.py = p0y
         self.m = m
         self.fixed = fixed
+        self.name=name
+
         self.qx_list = []
         self.qy_list = []
         self.prev_sign = None
@@ -60,7 +59,7 @@ class Particle:
     __repr__ = __str__
 
     def copy(self):
-        return Particle(self.qx, self.qy, self.px, self.py, self.m, fixed=self.fixed)
+        return Particle(self.qx, self.qy, self.px, self.py, self.m, fixed=self.fixed, name=self.name)
 
 class InitialState:
     def __init__(self, initialparticles):
@@ -82,9 +81,12 @@ class System:
         self.t = 0
         self.stepsperframe = stepsperframe
         self.numframes = int(self.tmax/self.dt//self.stepsperframe)
-        self.energies = []
+        self.energies = [[] for p in self.particles]
         self.eccentricities = []
         self.error = 0
+        self.edrift = 0
+        self.initial_Etot = self.Etot()
+        self.initial_energies = [self.H(i) for i in range(len(self.particles))]
 
     def step(self):
         self.integrator.integrate()
@@ -94,14 +96,24 @@ class System:
                 if self.particles[0].prev_sign != np.sign(self.particles[0].qy):
                     self.error = abs(self.particles[0].qx - self.particles[0].q0x)
                     print("found error at qy=",self.particles[0].qy)
+                    self.edrift = abs(self.H(0) - self.initial_energies[0])/abs(self.initial_energies[0])
+                    print("found edrift",self.edrift, self.H(0) - self.initial_energies[0],self.initial_energies[0])
             self.particles[0].prev_sign = np.sign(self.particles[0].qy)
         if self.t % 10000 == 0:
-            print("[",round(self.t/self.tmax,3),"]", self.eccentricity())
-            self.energies.append(self.H())
-            self.eccentricities.append(self.eccentricity())
-            self.particles[0].store_position()
+            for i in range(len(self.particles)):
+                self.energies[i].append(self.H(i) - self.initial_energies[i])
+            try:
+                ecc = self.eccentricity(0)
+                # ecc2= self.eccentricity(2)
+                self.eccentricities.append(ecc)
+            except ValueError:
+                print("[",round(self.t/self.tmax,3),"]","Hyperbolic")
+            else:
+                print("[",round(self.t/self.tmax,3),"]", ecc)
+            for p in self.particles:
+                if p.name.lower() != "sun": p.store_position()
 
-    def H(self, idx=None):
+    def H(self, idx=None, heliocentric=False):
         if idx is None:
             T=sum(map(lambda body: body.kinetic_energy(), self.particles))
         else:
@@ -110,9 +122,17 @@ class System:
         for i in range(len(self.particles)):
             if idx is not None and idx != i: continue  # skip if not specific particle
             for j in range(i+1, len(self.particles)):
+                if heliocentric and self.particles[j].name.lower() != "sun": continue
                 denom = norm(self.particles[i].qx-self.particles[j].qx, self.particles[i].qy-self.particles[j].qy)
                 U -= G*self.particles[i].m*self.particles[j].m/denom
         return T+U 
+
+    def Etot(self, diff=False):
+        if diff: # should plot the difference to the initial energy instead
+            Efunc = lambda i: self.H(i)-self.initial_Etot
+        else:
+            Efunc = self.H
+        return sum(map(Efunc, range(len(self.particles))))
 
     def reduced_mass(self):
         one_over_m = sum(map(lambda body: 1/body.m, self.particles))
@@ -124,9 +144,11 @@ class System:
         sgn = 1 if Ltot[2] > 0 else -1
         return sgn*np.linalg.norm(Ltot)
 
-    def eccentricity(self):
-        Ltot = self.total_angular_momentum()
-        return math.sqrt(1 + 2*self.H()*Ltot**2/(self.reduced_mass()*(G*self.particles[0].m*self.particles[1].m)**2))
+    def eccentricity(self, i):
+        Ltot = np.linalg.norm(self.particles[i].angular_momentum())
+        Etot = self.H(i, heliocentric=True)
+        reduced_mass = 1/(1/self.particles[1].m + 1/self.particles[i].m)
+        return math.sqrt(1 + 2*Etot*Ltot**2/(reduced_mass*(G*self.particles[i].m*self.particles[1].m)**2))
 
     def simulate(self):
         while self.t < self.tmax:
@@ -142,19 +164,51 @@ class System:
         # ax.add_artist(circle)
         # animation function.  This is called sequentially
         def nextframe(framenr):
-            for frame in range(se-lf.stepsperframe):
+            for frame in range(self.stepsperframe):
                 self.step()
-            self.energies.append(self.H())
-            try:
-                self.eccentricities.append(self.eccentricity())
-            except ValueError:
-                print("Hyperbolic")
             d.set_data([body.qx for body in self.particles],
                     [body.qy for body in self.particles])
             return d,
         # call the animator.  blit=True means only re-draw the parts that have changed.
         anim = animation.FuncAnimation(fig, nextframe, frames=self.numframes, interval=interval, blit=True)
         plt.show()
+        
+    def plot_energies(self):
+        plt.figure()
+        for i,p in enumerate(self.particles):
+            plt.plot(self.energies[i], label=p.name)
+        etot = list(map(sum, zip(*self.energies)))
+        plt.plot(etot, label="Total energy")
+        plt.title("Energy over time," + self.integrator.NAME)
+        plt.legend()
+        plt.show()
+
+    def plot_energy(self, i):
+        plt.figure()
+        plt.plot(self.energies[i], label=self.particles[i].name)
+        plt.title("Energy over time, " + self.integrator.NAME)
+        plt.legend()
+        plt.show()
+
+    def plot_trajectories(self,show=True,new_fig=True):
+        if new_fig: plt.figure()
+        for i, p in enumerate(self.particles):
+            if p.name.lower() == "sun":
+                plt.plot([0],[0],'or', label=p.name) # sun at center
+            else:
+                plt.plot(p.qx_list, p.qy_list, '-', label=p.name)
+        plt.title("Solar system trajectories")
+        plt.legend()
+        if show:
+            plt.show()
+
+    def plot_trajectory(self,i,show,new_fig):
+        if new_fig: plt.figure()
+        plt.plot(self.particles[i].qx_list, self.particles[i].qy_list, '-', label=self.particles[i].name)
+        plt.title("Solar system trajectories")
+        if show:
+            plt.legend(loc="lower left")
+            plt.show()
 
 
 if __name__ == "__main__":
@@ -169,7 +223,7 @@ if __name__ == "__main__":
     initial_state = InitialState(particles)
 
     integrators = [SymplecticEuler, Leapfrog, RungeKutta4]
-    timesteps = [10, 100, 1000, 10000]
+    timesteps = [10000,1000,100,10]
 
     errors = np.zeros((len(integrators), len(timesteps)))
     
